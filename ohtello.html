@@ -1,0 +1,177 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>オセロ（Firebase安定版＋拡張）</title>
+  <style>
+    :root{ --board-size:min(640px,92vw); --bg:#0b3d2e; }
+    body{font-family:system-ui,-apple-system,"Hiragino Kaku Gothic ProN","Noto Sans JP","Segoe UI",Roboto,"Yu Gothic";
+      display:flex;gap:18px;align-items:flex-start;justify-content:center;padding:20px;background:#e9f0ed;color:#062;}
+    .wrap{display:flex;gap:18px;align-items:flex-start;flex-wrap:wrap;justify-content:center;}
+    .board{width:var(--board-size);height:var(--board-size);background:linear-gradient(#0f523b,#0b3d2e);
+      display:grid;grid-template-columns:repeat(8,1fr);grid-template-rows:repeat(8,1fr);gap:2px;padding:6px;border-radius:12px;
+      box-shadow:0 6px 18px rgba(0,0,0,0.18);transition:opacity 0.3s ease;}
+    .cell{background:var(--bg);border-radius:6px;position:relative;display:flex;align-items:center;justify-content:center;cursor:pointer;overflow:visible;}
+    .disc{width:84%;height:84%;border-radius:50%;box-shadow:inset 0 -6px 12px rgba(0,0,0,0.25);
+      transform-style:preserve-3d;backface-visibility:hidden;animation:dropIn 0.3s ease;}
+    .disc.black{background:linear-gradient(#222,#000);}
+    .disc.white{background:linear-gradient(#fff,#ddd);}
+    @keyframes dropIn{from{transform:translateY(-40px) scale(0.7);opacity:0;}to{transform:translateY(0) scale(1);opacity:1;}}
+    .legal::after{content:'';position:absolute;width:14px;height:14px;border-radius:50%;background:rgba(255,255,255,0.9);opacity:0.9;box-shadow:0 1px 4px rgba(0,0,0,0.4);}
+    .controls{min-width:320px;display:flex;flex-direction:column;gap:10px;}
+    .status{background:#fff;padding:12px;border-radius:8px;box-shadow:0 6px 18px rgba(0,0,0,0.06);}
+    .row{display:flex;justify-content:space-between;gap:8px;align-items:center;}
+    button{padding:8px 12px;border-radius:8px;border:none;background:#0b7a59;color:#fff;font-weight:600;cursor:pointer;}
+    button.secondary{background:#5b5b5b;}
+    select,input{padding:8px;border-radius:6px;border:1px solid #ccc;}
+    .small{font-size:0.9rem;}
+  </style>
+</head>
+<body>
+<div class="wrap">
+  <div class="board" id="board"></div>
+
+  <div class="controls">
+    <div class="status">
+      <div class="row"><div>黒 (●)</div><div id="score-black">2</div></div>
+      <div class="row"><div>白 (○)</div><div id="score-white">2</div></div>
+      <hr>
+      <div class="row small"><div>現在の手番</div><div id="turn">黒</div></div>
+      <div class="row small"><div>合法手数</div><div id="legal-count">4</div></div>
+      <div class="row small"><div>接続人数</div><div id="players-count">1</div></div>
+    </div>
+
+    <div class="status">
+      <div class="row"><div>モード</div>
+        <select id="modeSelect">
+          <option value="cpu">シングルプレイ（CPU）</option>
+          <option value="local">ローカル2人対戦</option>
+          <option value="online">オンライン対戦</option>
+        </select>
+      </div>
+
+      <div id="cpuPanel" style="margin-top:8px">
+        <div class="row small"><div>CPU強さ</div>
+          <select id="aiLevel"><option value="0">初級</option><option value="1" selected>中級</option><option value="2">上級</option></select>
+        </div>
+      </div>
+
+      <div id="onlinePanel" style="display:none;margin-top:10px">
+        <div class="row small"><div>オンライン</div>
+          <select id="onlineMode"><option value="off">オフ</option><option value="host">部屋を作る</option><option value="join">部屋に入る</option></select>
+        </div>
+        <div id="onlineControls" style="display:none;margin-top:8px">
+          <input id="roomId" placeholder="部屋ID"/>
+          <div style="display:flex;gap:6px;margin-top:4px;">
+            <button id="createRoom">作成</button>
+            <button id="joinRoom" class="secondary">参加</button>
+            <button id="deleteRoom" style="background:#b33;">削除</button>
+          </div>
+          <small id="connectionStatus">未接続</small>
+        </div>
+      </div>
+    </div>
+
+    <div style="display:flex;gap:8px;flex-wrap:wrap;justify-content:space-between">
+      <button id="reset">リセット</button>
+      <button id="undo" class="secondary">取り消し</button>
+      <button id="pass" class="secondary">パス</button>
+    </div>
+  </div>
+</div>
+
+<script type="module">
+import {initializeApp} from "https://www.gstatic.com/firebasejs/10.14.0/firebase-app.js";
+import {getDatabase,ref,set,get,onValue,remove,update,off} from "https://www.gstatic.com/firebasejs/10.14.0/firebase-database.js";
+
+const app=initializeApp({
+  apiKey:"AIzaSyC8x4BmjNJlqMkCbs1xIi_OkNc2Hp3UWbY",
+  authDomain:"othello-online-23943.firebaseapp.com",
+  databaseURL:"https://othello-online-23943-default-rtdb.firebaseio.com",
+  projectId:"othello-online-23943"
+});
+const db=getDatabase(app);
+
+document.addEventListener("DOMContentLoaded",()=>{
+  const SIZE=8,DIRS=[[-1,-1],[-1,0],[-1,1],[0,-1],[0,1],[1,-1],[1,0],[1,1]];
+  let board,turn=1,history=[],firebaseRoomId=null,firebasePlayer=null,fbUnsub=null,busy=false;
+  const boardEl=document.getElementById("board");
+  const scoreB=document.getElementById("score-black");
+  const scoreW=document.getElementById("score-white");
+  const turnEl=document.getElementById("turn");
+  const legalEl=document.getElementById("legal-count");
+  const modeSel=document.getElementById("modeSelect");
+  const passBtn=document.getElementById("pass");
+  const resetBtn=document.getElementById("reset");
+  const playersCount=document.getElementById("players-count");
+  const createBtn=document.getElementById("createRoom");
+  const joinBtn=document.getElementById("joinRoom");
+  const delBtn=document.getElementById("deleteRoom");
+  const connStatus=document.getElementById("connectionStatus");
+  const roomInput=document.getElementById("roomId");
+  const onlineControls=document.getElementById("onlineControls");
+
+  function init(){board=Array.from({length:8},()=>Array(8).fill(0));board[3][3]=2;board[3][4]=1;board[4][3]=1;board[4][4]=2;turn=1;render();}
+  function inside(r,c){return r>=0&&r<8&&c>=0&&c<8;}
+  function count(){let b=0,w=0;for(let r of board)for(let c of r){if(c===1)b++;else if(c===2)w++;}return {b,w};}
+  function legal(p){const o=p===1?2:1;let m=[];for(let r=0;r<8;r++)for(let c=0;c<8;c++){if(board[r][c])continue;for(let [dr,dc]of DIRS){let rr=r+dr,cc=c+dc,f=false;while(inside(rr,cc)&&board[rr][cc]===o){rr+=dr;cc+=dc;f=true;}if(f&&inside(rr,cc)&&board[rr][cc]===p){m.push([r,c]);break;}}}return m;}
+  function move(p,r,c){const o=p===1?2:1,f=[];board[r][c]=p;for(let[dr,dc]of DIRS){let rr=r+dr,cc=c+dc,t=[];while(inside(rr,cc)&&board[rr][cc]===o){t.push([rr,cc]);rr+=dr;cc+=dc;}if(t.length&&inside(rr,cc)&&board[rr][cc]===p){for(let[x,y]of t){board[x][y]=p;f.push([x,y]);}}}return f;}
+  function render(){
+    boardEl.innerHTML="";const L=legal(turn);
+    for(let r=0;r<8;r++)for(let c=0;c<8;c++){
+      const cell=document.createElement("div");cell.className="cell";cell.dataset.r=r;cell.dataset.c=c;
+      if(board[r][c]){const d=document.createElement("div");d.className="disc "+(board[r][c]===1?"black":"white");cell.appendChild(d);}
+      else if(L.some(([x,y])=>x===r&&y===c))cell.classList.add("legal");
+      boardEl.appendChild(cell);
+    }
+    const sc=count();scoreB.textContent=sc.b;scoreW.textContent=sc.w;turnEl.textContent=turn===1?"黒":"白";legalEl.textContent=L.length;
+    if(modeSel.value==="online")boardEl.style.opacity=firebasePlayer===turn?"1":"0.5";else boardEl.style.opacity="1";
+    passBtn.disabled=L.length>0;
+  }
+
+  boardEl.onclick=async e=>{
+    const cell=e.target.closest(".cell");if(!cell||busy)return;
+    const r=+cell.dataset.r,c=+cell.dataset.c;
+    if(!legal(turn).some(([x,y])=>x===r&&y===c))return;
+    if(modeSel.value==="online"){if(firebasePlayer!==turn)return;busy=true;move(turn,r,c);await update(ref(db,"rooms/"+firebaseRoomId),{board,turn:turn===1?2:1});busy=false;}
+    else{move(turn,r,c);turn=3-turn;render();setTimeout(()=>{if(modeSel.value==="cpu"&&turn===2)doCpu();},400);}
+  };
+
+  async function doCpu(){if(busy)return;busy=true;const L=legal(2);if(!L.length){turn=1;busy=false;render();return;}const [r,c]=L[Math.floor(Math.random()*L.length)];move(2,r,c);turn=1;busy=false;render();}
+
+  passBtn.onclick=async()=>{const L=legal(turn);if(L.length)return;if(modeSel.value==="online"&&firebaseRoomId){if(firebasePlayer!==turn)return;turn=3-turn;await update(ref(db,"rooms/"+firebaseRoomId),{turn});}else{turn=3-turn;render();}checkGameEnd();};
+
+  function checkGameEnd(){const m1=legal(1),m2=legal(2);if(!m1.length&&!m2.length){const s=count();alert(`ゲーム終了！ 黒:${s.b} 白:${s.w}`);}}
+
+  resetBtn.onclick=()=>{if(confirm("盤面をリセットしますか？"))init();};
+
+  createBtn.onclick=async()=>{
+    const id=Math.random().toString(36).slice(2,8);firebaseRoomId=id;firebasePlayer=1;
+    await set(ref(db,"rooms/"+id),{board,turn,players:1});
+    listen(id);connStatus.textContent="部屋作成:"+id;roomInput.value=id;
+  };
+  joinBtn.onclick=async()=>{
+    const id=roomInput.value.trim();if(!id)return;
+    const snap=await get(ref(db,"rooms/"+id));if(!snap.exists())return alert("存在しません");
+    firebaseRoomId=id;firebasePlayer=2;
+    await update(ref(db,"rooms/"+id),{players:2});
+    listen(id);connStatus.textContent="部屋参加:"+id;
+  };
+  delBtn.onclick=async()=>{
+    if(!firebaseRoomId)return;await remove(ref(db,"rooms/"+firebaseRoomId));alert("部屋を削除しました");firebaseRoomId=null;firebasePlayer=null;connStatus.textContent="未接続";init();
+  };
+
+  function listen(id){
+    if(fbUnsub){try{fbUnsub();}catch{}}
+    fbUnsub=onValue(ref(db,"rooms/"+id),snap=>{
+      const d=snap.val();if(!d){alert("部屋が削除されました");firebaseRoomId=null;firebasePlayer=null;connStatus.textContent="未接続";init();return;}
+      board=d.board;turn=d.turn;playersCount.textContent=d.players||1;render();
+    });
+  }
+
+  init();
+});
+</script>
+</body>
+</html>
